@@ -17,6 +17,7 @@
 package net.protyposis.android.mediaplayer;
 
 import android.content.Context;
+import android.media.AudioManager;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.net.Uri;
@@ -28,6 +29,7 @@ import android.view.SurfaceHolder;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 
 /**
  * Created by maguggen on 04.06.2014.
@@ -132,6 +134,7 @@ public class MediaPlayer {
 
     private enum State {
         IDLE,
+        INITIALIZED,
         PREPARING,
         PREPARED,
         STOPPED,
@@ -154,6 +157,7 @@ public class MediaPlayer {
     private MediaFormat mAudioFormat;
     private long mAudioMinPTS;
     private int mAudioSessionId;
+    private int mAudioStreamType;
     private float mVolumeLeft = 1, mVolumeRight = 1;
 
     private PlaybackThread mPlaybackThread;
@@ -185,7 +189,12 @@ public class MediaPlayer {
 
     private State mCurrentState;
 
-    private final Object PT_SYNC = new Object();
+    /**
+     * A lock to sync release() with the actual releasing on the playback thread. This lock makes
+     * sure that release() waits until everything has been released before returning to the caller,
+     * and thus makes the async release look synchronized to an API caller.
+     */
+    private Object mReleaseSyncLock;
 
     public MediaPlayer() {
         mPlaybackThread = null;
@@ -193,9 +202,15 @@ public class MediaPlayer {
         mTimeBase = new TimeBase();
         mVideoRenderTimingMode = VideoRenderTimingMode.AUTO;
         mCurrentState = State.IDLE;
+        mAudioSessionId = 0; // AudioSystem.AUDIO_SESSION_ALLOCATE;
+        mAudioStreamType = AudioManager.STREAM_MUSIC;
     }
 
-    public void setDataSource(MediaSource source) throws IOException {
+    public void setDataSource(MediaSource source) throws IOException, IllegalStateException {
+        if(mCurrentState != State.IDLE) {
+            throw new IllegalStateException();
+        }
+
         mVideoExtractor = source.getVideoExtractor();
         mAudioExtractor = source.getAudioExtractor();
 
@@ -244,6 +259,8 @@ public class MediaPlayer {
         if(mVideoTrackIndex != MediaCodecDecoder.INDEX_NONE && mPlaybackThread == null && mSurface == null) {
             Log.i(TAG, "no video output surface specified");
         }
+
+        mCurrentState = State.INITIALIZED;
     }
 
     /**
@@ -264,19 +281,7 @@ public class MediaPlayer {
         setDataSource(context, uri, null);
     }
 
-    /**
-     * @see android.media.MediaPlayer#prepare()
-     */
-    public void prepare() throws IOException, IllegalStateException {
-        mCurrentState = State.PREPARING;
-
-        if (mAudioFormat != null) {
-            mAudioPlayback = new AudioPlayback();
-            // Initialize settings in case they have already been set before the preparation
-            mAudioPlayback.setAudioSessionId(mAudioSessionId);
-            setVolume(mVolumeLeft, mVolumeRight); // sets the volume on mAudioPlayback
-        }
-
+    private void prepareInternal() throws IOException, IllegalStateException {
         MediaCodecDecoder.OnDecoderEventListener decoderEventListener = new MediaCodecDecoder.OnDecoderEventListener() {
             @Override
             public void onBuffering(MediaCodecDecoder decoder) {
@@ -294,6 +299,11 @@ public class MediaPlayer {
             }
         };
 
+        if(mCurrentState == State.RELEASING) {
+            // release() has already been called, drop out of prepareAsync() (can only happen with async prepare)
+            return;
+        }
+
         mDecoders = new Decoders();
 
         if(mVideoTrackIndex != MediaCodecDecoder.INDEX_NONE) {
@@ -307,6 +317,11 @@ public class MediaPlayer {
         }
 
         if(mAudioTrackIndex != MediaCodecDecoder.INDEX_NONE) {
+            mAudioPlayback = new AudioPlayback();
+            // Initialize settings in case they have already been set before the preparation
+            mAudioPlayback.setAudioSessionId(mAudioSessionId);
+            setVolume(mVolumeLeft, mVolumeRight); // sets the volume on mAudioPlayback
+
             try {
                 boolean passive = (mAudioExtractor == mVideoExtractor || mAudioExtractor == null);
                 MediaCodecDecoder ad = new MediaCodecAudioDecoder(mAudioExtractor != null ? mAudioExtractor : mVideoExtractor,
@@ -314,6 +329,7 @@ public class MediaPlayer {
                 mDecoders.addDecoder(ad);
             } catch (Exception e) {
                 Log.e(TAG, "cannot create audio decoder: " + e.getMessage());
+                mAudioPlayback = null;
             }
         }
 
@@ -324,6 +340,7 @@ public class MediaPlayer {
 
         if (mAudioPlayback != null) {
             mAudioSessionId = mAudioPlayback.getAudioSessionId();
+            mAudioStreamType = mAudioPlayback.getAudioStreamType();
         }
 
         // After the decoder is initialized, we know the video size
@@ -342,8 +359,8 @@ public class MediaPlayer {
             mEventHandler.sendMessage(mEventHandler.obtainMessage(MEDIA_SET_VIDEO_SIZE, width, height));
         }
 
-        if(mCurrentState == State.RELEASING || mCurrentState == State.RELEASED) {
-            // Cancel preparation if release was called in between
+        if(mCurrentState == State.RELEASING) {
+            // release() has already been called, drop out of prepareAsync()
             return;
         }
 
@@ -363,17 +380,24 @@ public class MediaPlayer {
             if (mAudioPlayback != null) mAudioPlayback.pause(true);
             mDecoders.seekTo(SeekMode.FAST_TO_PREVIOUS_SYNC, 0);
         }
+    }
 
-        synchronized(PT_SYNC) {
-            if(mCurrentState == State.RELEASING || mCurrentState == State.RELEASED) {
-                // Cancel preparation if release was called in between
-                return;
-            }
-
-            // Create the playback loop handler thread
-            mPlaybackThread = new PlaybackThread();
-            mPlaybackThread.start();
+    /**
+     * @see android.media.MediaPlayer#prepare()
+     */
+    public void prepare() throws IOException, IllegalStateException {
+        if(mCurrentState != State.INITIALIZED && mCurrentState != State.STOPPED) {
+            throw new IllegalStateException();
         }
+
+        mCurrentState = State.PREPARING;
+
+        // Prepare synchronously on caller thread
+        prepareInternal();
+
+        // Create the playback loop handler thread
+        mPlaybackThread = new PlaybackThread();
+        mPlaybackThread.start();
 
         mCurrentState = State.PREPARED;
     }
@@ -382,38 +406,18 @@ public class MediaPlayer {
      * @see android.media.MediaPlayer#prepareAsync()
      */
     public void prepareAsync() throws IllegalStateException {
+        if(mCurrentState != State.INITIALIZED && mCurrentState != State.STOPPED) {
+            throw new IllegalStateException();
+        }
+
         mCurrentState = State.PREPARING;
 
-        /* Running prepare() in an AsyncTask leads to severe performance degradations, unless the
-         * priority of the AsyncTask is elevated from background (e.g. to default). Here we are directly
-         * using a thread to avoid the dreaded AsyncTask, because the overhead of creating this thread
-         * vs. reusing a thread from the AsyncTask's pool is negligible (it's a one time operation).
-         * It seems that threads created in a background thread have a way lower priority, no matter
-         * the priority the threads themselves are set to. This leads to a handler with delayed
-         * messages every 10ms to execute only every ~50ms, a 5x performance degradation. This affects
-         * the mediaplayer loop and possibly the audio playback thread and decoder threads too.
-         */
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    prepare();
+        // Create the playback loop handler thread
+        mPlaybackThread = new PlaybackThread();
+        mPlaybackThread.start();
 
-                    if(mCurrentState == State.PREPARED) {
-                        // This event is only triggered after a successful async prepare (not after the sync prepare!)
-                        mEventHandler.sendEmptyMessage(MEDIA_PREPARED);
-                    }
-                } catch (IOException e) {
-                    Log.e(TAG, "prepareAsync() failed: cannot decode stream(s)", e);
-                    mEventHandler.sendMessage(mEventHandler.obtainMessage(MEDIA_ERROR,
-                            MEDIA_ERROR_UNKNOWN, MEDIA_ERROR_IO));
-                } catch (IllegalStateException e) {
-                    Log.e(TAG, "prepareAsync() failed: surface might be gone", e);
-                    mEventHandler.sendMessage(mEventHandler.obtainMessage(MEDIA_ERROR,
-                            MEDIA_ERROR_UNKNOWN, 0));
-                }
-            }
-        }).start();
+        // Execute prepare asynchronously on playback thread
+        mPlaybackThread.prepare();
     }
 
     /**
@@ -462,11 +466,21 @@ public class MediaPlayer {
     }
 
     public void start() {
+        if(mCurrentState != State.PREPARED) {
+            mCurrentState = State.ERROR;
+            throw new IllegalStateException();
+        }
+
         mPlaybackThread.play();
         stayAwake(true);
     }
 
     public void pause() {
+        if(mCurrentState != State.PREPARED) {
+            mCurrentState = State.ERROR;
+            throw new IllegalStateException();
+        }
+
         mPlaybackThread.pause();
         stayAwake(false);
     }
@@ -480,6 +494,11 @@ public class MediaPlayer {
     }
 
     public void seekTo(long usec) {
+        if(mCurrentState.ordinal() < State.PREPARED.ordinal() && mCurrentState.ordinal() >= State.RELEASING.ordinal()) {
+            mCurrentState = State.ERROR;
+            throw new IllegalStateException();
+        }
+
         /* A seek needs to be performed in the decoding thread to execute commands in the correct
          * order. Otherwise it can happen that, after a seek in the media decoder, seeking procedure
          * starts, then a frame is decoded, and then the codec is flushed; the PTS of the decoded frame
@@ -530,6 +549,11 @@ public class MediaPlayer {
     }
 
     public boolean isPlaying() {
+        if(mCurrentState.ordinal() >= State.RELEASING.ordinal()) {
+            mCurrentState = State.ERROR;
+            throw new IllegalStateException();
+        }
+
         return mPlaybackThread != null && !mPlaybackThread.isPaused();
     }
 
@@ -548,22 +572,46 @@ public class MediaPlayer {
     }
 
     public void stop() {
-        mCurrentPosition = 0;
-        if(mPlaybackThread != null) {
-            mPlaybackThread.release();
-            mPlaybackThread = null;
-        }
-        stayAwake(false);
+        mCurrentPosition = 0; // TODO a lot of work todo
+        release();
+        mCurrentState = State.STOPPED;
     }
 
     public void release() {
+        if(mCurrentState == State.RELEASING || mCurrentState == State.RELEASED) {
+            return;
+        }
+
         mCurrentState = State.RELEASING;
-        stop();
-        mCurrentState = MediaPlayer.State.RELEASED;
+
+        if(mPlaybackThread != null) {
+            // Create a new lock object for this release cycle
+            mReleaseSyncLock = new Object();
+
+            synchronized (mReleaseSyncLock) {
+                try {
+                    // Schedule release on the playback thread
+                    mPlaybackThread.release();
+                    mPlaybackThread = null;
+
+                    // Wait for the release on the playback thread to finish
+                    mReleaseSyncLock.wait();
+                } catch (InterruptedException e) {
+                    // nothing to do here
+                }
+            }
+
+            mReleaseSyncLock = null;
+        }
+
+        stayAwake(false);
+
+        mCurrentState = State.RELEASED;
     }
 
     public void reset() {
         stop();
+        mCurrentState = State.IDLE;
     }
 
     /**
@@ -619,11 +667,20 @@ public class MediaPlayer {
     }
 
     public int getDuration() {
+        if(mCurrentState.ordinal() <= State.PREPARING.ordinal() && mCurrentState.ordinal() >= State.RELEASING.ordinal()) {
+            mCurrentState = State.ERROR;
+            throw new IllegalStateException();
+        }
+
         return mVideoFormat != null ? (int)(mVideoFormat.getLong(MediaFormat.KEY_DURATION)/1000) :
                 mAudioFormat != null && mAudioFormat.containsKey(MediaFormat.KEY_DURATION) ? (int)(mAudioFormat.getLong(MediaFormat.KEY_DURATION)/1000) : 0;
     }
 
     public int getCurrentPosition() {
+        if(mCurrentState.ordinal() >= State.RELEASING.ordinal()) {
+            mCurrentState = State.ERROR;
+            throw new IllegalStateException();
+        }
         /* During a seek, return the temporary seek target time; otherwise a seek bar doesn't
          * update to the selected seek position until the seek is finished (which can take a
          * while in exact mode). */
@@ -635,11 +692,21 @@ public class MediaPlayer {
     }
 
     public int getVideoWidth() {
+        if(mCurrentState.ordinal() >= State.RELEASING.ordinal()) {
+            mCurrentState = State.ERROR;
+            throw new IllegalStateException();
+        }
+
         return mVideoFormat != null ? (int)(mVideoFormat.getInteger(MediaFormat.KEY_HEIGHT)
                 * mVideoFormat.getFloat(MediaExtractor.MEDIA_FORMAT_EXTENSION_KEY_DAR)) : 0;
     }
 
     public int getVideoHeight() {
+        if(mCurrentState.ordinal() >= State.RELEASING.ordinal()) {
+            mCurrentState = State.ERROR;
+            throw new IllegalStateException();
+        }
+
         return mVideoFormat != null ? mVideoFormat.getInteger(MediaFormat.KEY_HEIGHT) : 0;
     }
 
@@ -668,7 +735,30 @@ public class MediaPlayer {
      * @see android.media.MediaPlayer#setAudioSessionId(int)
      */
     public void setAudioSessionId(int sessionId) {
+        if(mCurrentState != State.IDLE) {
+            throw new IllegalStateException();
+        }
         mAudioSessionId = sessionId;
+    }
+
+    /**
+     * @see android.media.MediaPlayer#getAudioSessionId()
+     */
+    public int getAudioSessionId() {
+        return mAudioSessionId;
+    }
+
+    public void setAudioStreamType(int streamType) {
+        // Can be set any time, no IllegalStateException is thrown, but value will be ignored if audio is already initialized
+        mAudioStreamType = streamType;
+    }
+
+    /**
+     * Gets the stream type of the audio playback session.
+     * @return the stream type
+     */
+    public int getAudioStreamType() {
+        return mAudioStreamType;
     }
 
     /**
@@ -698,26 +788,21 @@ public class MediaPlayer {
         mVideoRenderTimingMode = mode;
     }
 
-    /**
-     * @see android.media.MediaPlayer#getAudioSessionId()
-     */
-    public int getAudioSessionId() {
-        return mAudioSessionId;
-    }
-
     private class PlaybackThread extends HandlerThread implements Handler.Callback {
 
-        private static final int PLAYBACK_PLAY = 1;
-        private static final int PLAYBACK_PAUSE = 2;
-        private static final int PLAYBACK_LOOP = 3;
-        private static final int PLAYBACK_SEEK = 4;
-        private static final int PLAYBACK_RELEASE = 5;
-        private static final int PLAYBACK_PAUSE_AUDIO = 6;
+        private static final int PLAYBACK_PREPARE = 1;
+        private static final int PLAYBACK_PLAY = 2;
+        private static final int PLAYBACK_PAUSE = 3;
+        private static final int PLAYBACK_LOOP = 4;
+        private static final int PLAYBACK_SEEK = 5;
+        private static final int PLAYBACK_RELEASE = 6;
+        private static final int PLAYBACK_PAUSE_AUDIO = 7;
 
         static final int DECODER_SET_SURFACE = 100;
 
         private Handler mHandler;
         private boolean mPaused;
+        private boolean mReleasing;
         private MediaCodecDecoder.FrameInfo mVideoFrameInfo;
         private boolean mRenderModeApi21; // Usage of timed outputBufferRelease on API 21+
         private boolean mRenderingStarted; // Flag to know if decoding the first frame
@@ -730,6 +815,7 @@ public class MediaPlayer {
 
             // Init fields
             mPaused = true;
+            mReleasing = false;
             mRenderModeApi21 = mVideoRenderTimingMode.isRenderModeApi21();
             mRenderingStarted = true;
             mAVLocked = false;
@@ -743,6 +829,10 @@ public class MediaPlayer {
             mHandler = new Handler(this.getLooper(), this);
 
             Log.d(TAG, "PlaybackThread started");
+        }
+
+        public void prepare() {
+            mHandler.sendEmptyMessage(PLAYBACK_PREPARE);
         }
 
         public void play() {
@@ -776,44 +866,29 @@ public class MediaPlayer {
                 return;
             }
 
-            synchronized (PT_SYNC) {
-                // Set this flag so the loop does not schedule next loop iteration
-                mPaused = true;
+            mPaused = true; // Set this flag so the loop does not schedule next loop iteration
+            mReleasing = true;
 
-                if(mHandler != null) {
-                    // Remove other events waiting in line to make the destroy happen faster
-                    mHandler.removeMessages(PLAYBACK_SEEK);
-                    mHandler.removeMessages(PLAYBACK_LOOP);
-
-                    // Call actual release method
-                    mHandler.sendEmptyMessage(PLAYBACK_RELEASE);
-
-                    // wait for #releaseInternal to finish and notify
-                    try {
-                        PT_SYNC.wait();
-                    } catch (InterruptedException e) {
-                        Log.e(TAG, "interrupted", e);
-                    }
-                } else {
-                    // If we release while preparing and there is no handler yet, we call release
-                    // directly instead of through then not-yet-existing message queue handler.
-                    releaseInternal();
-                }
-            }
-
-            Log.d(TAG, "released");
+            // Call actual release method
+            // Actually it does not matter what we schedule here, we just need to schedule
+            // something so {@link #handleMessage} gets called on the handler thread, read the
+            // mReleasing flag, and call {@link #releaseInternal}.
+            mHandler.sendEmptyMessage(PLAYBACK_RELEASE);
         }
 
         @Override
         public boolean handleMessage(Message msg) {
-            if(isInterrupted()) {
-                // Do not process the message if an interrupt has been posted from releaseInternal().
-                // Resources are already released and executing any method results in an exception.
-                return true;
-            }
-
             try {
+                if(mReleasing) {
+                    // When the releasing flag is set, just release without processing any more messages
+                    releaseInternal();
+                    return true;
+                }
+
                 switch (msg.what) {
+                    case PLAYBACK_PREPARE:
+                        prepareInternal();
+                        return true;
                     case PLAYBACK_PLAY:
                         playInternal();
                         return true;
@@ -833,9 +908,8 @@ public class MediaPlayer {
                         releaseInternal();
                         return true;
                     case DECODER_SET_SURFACE:
-                        if(mDecoders != null && mDecoders.getVideoDecoder() != null) {
-                            mDecoders.getVideoDecoder().updateSurface((Surface) msg.obj);
-                        }
+                        setVideoSurface((Surface) msg.obj);
+                        return true;
                     default:
                         Log.d(TAG, "unknown/invalid message");
                         return false;
@@ -854,9 +928,34 @@ public class MediaPlayer {
                         MEDIA_ERROR_UNKNOWN, MEDIA_ERROR_IO));
             }
 
+            // Release after an exception
             releaseInternal();
-
             return true;
+        }
+
+        private void prepareInternal() {
+            try {
+                MediaPlayer.this.prepareInternal();
+                mCurrentState = MediaPlayer.State.PREPARED;
+
+                // This event is only triggered after a successful async prepare (not after the sync prepare!)
+                mEventHandler.sendEmptyMessage(MEDIA_PREPARED);
+            } catch (IOException e) {
+                Log.e(TAG, "prepareAsync() failed: cannot decode stream(s)", e);
+                mEventHandler.sendMessage(mEventHandler.obtainMessage(MEDIA_ERROR,
+                        MEDIA_ERROR_UNKNOWN, MEDIA_ERROR_IO));
+                releaseInternal();
+            } catch (IllegalStateException e) {
+                Log.e(TAG, "prepareAsync() failed: something is in a wrong state", e);
+                mEventHandler.sendMessage(mEventHandler.obtainMessage(MEDIA_ERROR,
+                        MEDIA_ERROR_UNKNOWN, 0));
+                releaseInternal();
+            } catch (IllegalArgumentException e) {
+                Log.e(TAG, "prepareAsync() failed: surface might be gone", e);
+                mEventHandler.sendMessage(mEventHandler.obtainMessage(MEDIA_ERROR,
+                        MEDIA_ERROR_UNKNOWN, 0));
+                releaseInternal();
+            }
         }
 
         private void playInternal() throws IOException, InterruptedException {
@@ -938,7 +1037,7 @@ public class MediaPlayer {
                 // This method needs a video frame to operate on. If there is no frame, we need
                 // to decode one first.
                 mVideoFrameInfo = mDecoders.decodeFrame(false);
-                if(mVideoFrameInfo == null) {
+                if(mVideoFrameInfo == null && !mDecoders.isEOS()) {
                     // If the decoder didn't return a frame, we need to give it some processing time
                     // and come back later...
                     mHandler.sendEmptyMessageDelayed(PLAYBACK_LOOP, 10);
@@ -972,7 +1071,7 @@ public class MediaPlayer {
             // Update the current position of the player
             mCurrentPosition = mDecoders.getCurrentDecodingPTS();
 
-            if(mDecoders.getVideoDecoder() != null) {
+            if(mDecoders.getVideoDecoder() != null && mVideoFrameInfo != null) {
                 renderVideoFrame(mVideoFrameInfo);
                 mVideoFrameInfo = null;
 
@@ -1005,6 +1104,10 @@ public class MediaPlayer {
 
                 // If looping is on, seek back to the start...
                 if(mLooping) {
+                    if(mAudioPlayback != null) {
+                        // Flush audio buffer to reset audio PTS
+                        mAudioPlayback.flush();
+                    }
                     mDecoders.seekTo(SeekMode.FAST_TO_PREVIOUS_SYNC, 0);
                     mDecoders.renderFrames();
                 }
@@ -1082,22 +1185,20 @@ public class MediaPlayer {
         }
 
         private void releaseInternal() {
-            interrupt(); // post interrupt to avoid all further execution of messages/events in the queue
-            mPaused = true;
+            // post interrupt to avoid all further execution of messages/events in the queue
+            interrupt();
 
-            // make sure no other events run afterwards
-            if(mHandler != null) {
-                mHandler.removeMessages(PLAYBACK_SEEK);
-                mHandler.removeMessages(PLAYBACK_LOOP);
-                mHandler.removeMessages(PLAYBACK_PAUSE);
-                mHandler.removeMessages(PLAYBACK_PAUSE_AUDIO);
-            }
+            // quit message processing and exit thread
+            quit();
 
             if(mDecoders != null) {
                 if(mVideoFrameInfo != null) {
                     mDecoders.getVideoDecoder().releaseFrame(mVideoFrameInfo);
                     mVideoFrameInfo = null;
                 }
+            }
+
+            if(mDecoders != null) {
                 mDecoders.release();
             }
             if(mAudioPlayback != null) mAudioPlayback.stopAndRelease();
@@ -1105,10 +1206,15 @@ public class MediaPlayer {
                 mAudioExtractor.release();
             }
             if(mVideoExtractor != null) mVideoExtractor.release();
+
             Log.d(TAG, "PlaybackThread destroyed");
 
-            synchronized (PT_SYNC) {
-                PT_SYNC.notify();
+            // Notify #release() that it can now continue because #releaseInternal is finished
+            if(mReleaseSyncLock != null) {
+                synchronized(mReleaseSyncLock) {
+                    mReleaseSyncLock.notify();
+                    mReleaseSyncLock = null;
+                }
             }
         }
 
@@ -1150,6 +1256,21 @@ public class MediaPlayer {
             }
             // Release the current frame and render it to the surface
             mDecoders.getVideoDecoder().renderFrame(videoFrameInfo, waitingTime);
+        }
+
+        private void setVideoSurface(Surface surface) {
+            if(mDecoders != null && mDecoders.getVideoDecoder() != null) {
+                if(mVideoFrameInfo != null) {
+                    // Dismiss queued video frame
+                    // After updating the surface, which re-initializes the codec,
+                    // the frame buffer will not be valid any more and trying to decode
+                    // it would result in an error; so we throw it away.
+                    mDecoders.getVideoDecoder().dismissFrame(mVideoFrameInfo);
+                    mVideoFrameInfo = null;
+                }
+
+                mDecoders.getVideoDecoder().updateSurface(surface);
+            }
         }
     }
 

@@ -118,7 +118,13 @@ class Decoders {
      */
     public void release() {
         for (MediaCodecDecoder decoder : mDecoders) {
-            decoder.release();
+            // Catch decoder.release() exceptions to avoid breaking the release loop on the first
+            // exception and leaking unreleased decoders.
+            try {
+                decoder.release();
+            } catch (Exception e) {
+                Log.e(TAG, "release failed", e);
+            }
         }
         mDecoders.clear();
     }
@@ -154,12 +160,13 @@ class Decoders {
 
     public boolean isEOS() {
         //return getCurrentDecodingPTS() == MediaCodecDecoder.PTS_EOS;
+        int eosCount = 0;
         for (MediaCodecDecoder decoder : mDecoders) {
             if(decoder.isOutputEos()) {
-                return true;
+                eosCount++;
             }
         }
-        return false;
+        return eosCount == mDecoders.size();
     }
 
     public long getCachedDuration() {
