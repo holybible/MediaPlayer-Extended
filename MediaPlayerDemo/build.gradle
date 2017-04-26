@@ -15,15 +15,15 @@ repositories {
 }
 
 android {
-    compileSdkVersion 22
-    buildToolsVersion "25.0.1"
+    compileSdkVersion rootProject.ext.compileSdkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
 
     defaultConfig {
         // Keep old ITEC package name as application Id for Play Store compatibility
         applicationId 'at.aau.itec.android.mediaplayerdemo'
 
-        minSdkVersion 16
-        targetSdkVersion 22
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName '1.0'
         buildConfigField "boolean", "CRASHLYTICS_CONFIGURED", "${isChrashlyticsConfigured()}"
