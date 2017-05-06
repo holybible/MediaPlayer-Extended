@@ -1,5 +1,9 @@
 apply plugin: 'com.android.library'
 apply plugin: 'com.novoda.bintray-release'
+apply plugin: 'com.github.dcendents.android-maven'
+
+version = "4.3.0.1-SNAPSHOT"
+group = "net.protyposis.android.mediaplayer"
 
 android {
     compileSdkVersion rootProject.ext.compileSdkVersion
@@ -8,8 +12,10 @@ android {
     defaultConfig {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode libraryVersionCode
-        versionName libraryVersionName
+//        versionCode libraryVersionCode
+//        versionName libraryVersionName
+        versionCode 29
+        versionName version
     }
     buildTypes {
         release {
@@ -19,8 +25,15 @@ android {
     }
 }
 
+repositories {
+    maven {
+        url "${localRepo}"
+    }
+}
+
 dependencies {
     compile fileTree(dir: 'libs', include: ['*.jar'])
+    provided 'com.vinuxproject:sonic:1.0.0'
 }
 
 publish {
@@ -34,3 +47,4 @@ publish {
 }
 
 //apply from: "../gitversioning.gradle"
+apply from: 'local-push.gradle'

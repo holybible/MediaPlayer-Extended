@@ -1,0 +1,18 @@
+uploadArchives {
+    repositories {
+        mavenDeployer {
+            snapshotRepository(url: "${localSnapshot}") {
+                authentication(userName: localUsername, password: localPassword)
+            }
+            repository(url: "${localRelease}") {
+                authentication(userName: localUsername, password: localPassword)
+            }
+            pom {
+                project {
+                    packaging 'aar'
+                    name 'MediaPlayer-Extended'
+                }
+            }
+        }
+    }
+}

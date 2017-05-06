@@ -22,6 +22,8 @@ import android.media.AudioTrack;
 import android.media.MediaFormat;
 import android.util.Log;
 
+import org.vinuxproject.sonic.Sonic;
+
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.LinkedList;
@@ -30,7 +32,7 @@ import java.util.Queue;
 
 /**
  * Wrapper of an AudioTrack for easier management in the playback thread.
- *
+ * <p>
  * Created by maguggen on 23.09.2014.
  */
 class AudioPlayback {
@@ -66,6 +68,10 @@ class AudioPlayback {
      */
     private long mLastPlaybackHeadPositionUs;
 
+    // --------- divider -----------//
+    private Sonic mSonic;
+    // --------- divider -----------//
+
     public AudioPlayback() {
         mFrameChunkSize = 4096 * 2; // arbitrary default chunk size
         mBufferQueue = new BufferQueue();
@@ -83,8 +89,8 @@ class AudioPlayback {
 
         boolean playing = false;
 
-        if(isInitialized()) {
-            if(!checkIfReinitializationRequired(format)) {
+        if (isInitialized()) {
+            if (!checkIfReinitializationRequired(format)) {
                 // Set new format that equals the old one (in case we compare references somewhere)
                 mAudioFormat = format;
                 return;
@@ -108,7 +114,7 @@ class AudioPlayback {
         mSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
 
         int channelConfig = AudioFormat.CHANNEL_OUT_DEFAULT;
-        switch(channelCount) {
+        switch (channelCount) {
             case 1:
                 channelConfig = AudioFormat.CHANNEL_OUT_MONO;
                 break;
@@ -135,17 +141,22 @@ class AudioPlayback {
                 mPlaybackBufferSize, // at least twice the size to enable double buffering (according to docs)
                 AudioTrack.MODE_STREAM, mAudioSessionId);
 
-        if(mAudioTrack.getState() != AudioTrack.STATE_INITIALIZED) {
+        if (mAudioTrack.getState() != AudioTrack.STATE_INITIALIZED) {
             stopAndRelease();
             throw new IllegalStateException("audio track init failed");
         }
+
+        mSonic = new Sonic(mSampleRate, channelCount);
+        mSonic.setSpeed(1.0f); // default value
+        mSonic.setPitch(1.0f); // default value
+        mSonic.setRate(1.0f);  // default value
 
         mAudioSessionId = mAudioTrack.getAudioSessionId();
         mAudioStreamType = mAudioTrack.getStreamType();
         setStereoVolume(mVolumeLeft, mVolumeRight);
         mPresentationTimeOffsetUs = PTS_NOT_SET;
 
-        if(playing) {
+        if (playing) {
             play();
         }
     }
@@ -160,7 +171,7 @@ class AudioPlayback {
      * Can be used to set an audio session ID before calling {@link #init(android.media.MediaFormat)}.
      */
     public void setAudioSessionId(int sessionId) {
-        if(isInitialized()) {
+        if (isInitialized()) {
             throw new IllegalStateException("cannot set session id on an initialized audio track");
         }
         mAudioSessionId = sessionId;
@@ -184,7 +195,7 @@ class AudioPlayback {
 
     public void play() {
         //Log.d(TAG, "play");
-        if(isInitialized()) {
+        if (isInitialized()) {
             mAudioTrack.play();
             mAudioThread.setPaused(false);
         } else {
@@ -194,11 +205,11 @@ class AudioPlayback {
 
     public void pause(boolean flush) {
         //Log.d(TAG, "pause(" + flush + ")");
-        if(isInitialized()) {
+        if (isInitialized()) {
             mAudioThread.setPaused(true);
             mAudioTrack.pause();
 
-            if(flush) {
+            if (flush) {
                 flush();
             }
         } else {
@@ -211,9 +222,9 @@ class AudioPlayback {
     }
 
     public void flush() {
-        if(isInitialized()) {
+        if (isInitialized()) {
             boolean playing = isPlaying();
-            if(playing) {
+            if (playing) {
                 mAudioTrack.pause();
             }
             mAudioTrack.flush();
@@ -222,7 +233,7 @@ class AudioPlayback {
             // Reset offset so it gets updated with the current PTS when playback continues
             mPresentationTimeOffsetUs = PTS_NOT_SET;
 
-            if(playing) {
+            if (playing) {
                 mAudioTrack.play();
             }
         } else {
@@ -234,7 +245,7 @@ class AudioPlayback {
         int sizeInBytes = audioData.remaining();
 
         // TODO find a way to determine the audio decoder max output frame size at configuration time
-        if(mFrameChunkSize < sizeInBytes) {
+        if (mFrameChunkSize < sizeInBytes) {
             Log.d(TAG, "incoming frame chunk size increased to " + sizeInBytes);
             mFrameChunkSize = sizeInBytes;
             // re-init the audio track to accommodate buffer to new chunk size
@@ -242,7 +253,7 @@ class AudioPlayback {
         }
 
         // Special handling of the first written audio buffer after a flush (pause with flush)
-        if(mPresentationTimeOffsetUs == PTS_NOT_SET) {
+        if (mPresentationTimeOffsetUs == PTS_NOT_SET) {
             // Initialize with the PTS of the first audio buffer (which isn't necessarily zero)
             mPresentationTimeOffsetUs = presentationTimeUs;
             mLastPlaybackHeadPositionUs = 0;
@@ -264,7 +275,7 @@ class AudioPlayback {
              * {@link #getCurrentPresentationTimeUs} method returning a correct value.
              */
             long playbackHeadPositionUs = getPlaybackheadPositionUs();
-            if(playbackHeadPositionUs > 0) {
+            if (playbackHeadPositionUs > 0) {
                 mPresentationTimeOffsetUs -= playbackHeadPositionUs;
                 Log.d(TAG, "playback head not reset");
             }
@@ -278,17 +289,18 @@ class AudioPlayback {
     }
 
     private void stopAndRelease(boolean killThread) {
-        if(killThread && mAudioThread != null) {
+        if (killThread && mAudioThread != null) {
             mAudioThread.interrupt();
         }
 
-        if(mAudioTrack != null) {
-            if(isInitialized()) {
+        if (mAudioTrack != null) {
+            if (isInitialized()) {
                 mAudioTrack.stop();
             }
             mAudioTrack.release();
         }
         mAudioTrack = null;
+        mSonic = null;
     }
 
     public void stopAndRelease() {
@@ -297,10 +309,11 @@ class AudioPlayback {
 
     /**
      * Returns the length of the queued audio, that does not fit into the playback buffer yet.
+     *
      * @return the length of the queued audio in microsecs
      */
     public long getQueueBufferTimeUs() {
-        return (long)((double)(mBufferQueue.mQueuedDataSize / mFrameSize)
+        return (long) ((double) (mBufferQueue.mQueuedDataSize / mFrameSize)
                 / mSampleRate * 1000000d);
     }
 
@@ -308,41 +321,43 @@ class AudioPlayback {
      * Returns the length of the playback buffer, without posidering the current playback position
      * inside the buffer (the remaining audio data that is waiting for playback can be less than
      * the buffer length).
+     *
      * @return the length of the playback buffer in microsecs
      */
     public long getPlaybackBufferTimeUs() {
-        return (long)((double)(mPlaybackBufferSize / mFrameSize) / mSampleRate * 1000000d);
+        return (long) ((double) (mPlaybackBufferSize / mFrameSize) / mSampleRate * 1000000d);
     }
 
     private long getPlaybackheadPositionUs() {
         // The playback head position is encoded as a uint in an int
         long playbackHeadPosition = 0xFFFFFFFFL & mAudioTrack.getPlaybackHeadPosition();
         // Convert frames to time
-        return (long)((double)playbackHeadPosition / mSampleRate * 1000000);
+        return (long) ((double) playbackHeadPosition / mSampleRate * 1000000);
     }
 
     /**
      * Returns the current PTS of the playback head or PTS_NOT_SET if the PTS cannot be reliably
      * calculated yet.
      * For this method to return a PTS, audio samples need to be written before ({@link #write(ByteBuffer, long)}.
+     *
      * @return the PTS at the playback head or PTS_NOT_SET if unknown
      */
     public long getCurrentPresentationTimeUs() {
         // Return the PTS_NOT_SET flag when the PTS has not been initialized yet. At the start of
         // media playback, returning the playback head alone is reliable, but later on (e.g. after a
         // seek), a missing PTS offset leads to totally wrong values.
-        if(mPresentationTimeOffsetUs == PTS_NOT_SET) {
+        if (mPresentationTimeOffsetUs == PTS_NOT_SET) {
             return PTS_NOT_SET;
         }
 
         long playbackHeadPositionUs = getPlaybackheadPositionUs();
 
         // Handle playback head wrapping
-        if(playbackHeadPositionUs < mLastPlaybackHeadPositionUs) {
+        if (playbackHeadPositionUs < mLastPlaybackHeadPositionUs) {
             // playback head position has wrapped around it's 32bit uint value
             Log.d(TAG, "playback head has wrapped");
             // Add the full runtime to the PTS offset to advance it one playback head iteration
-            mPresentationTimeOffsetUs += (long)((double)0xFFFFFFFF / mSampleRate * 1000000);
+            mPresentationTimeOffsetUs += (long) ((double) 0xFFFFFFFF / mSampleRate * 1000000);
         }
         mLastPlaybackHeadPositionUs = playbackHeadPositionUs;
 
@@ -355,8 +370,10 @@ class AudioPlayback {
     }
 
     public void setPlaybackSpeed(float speed) {
-        if(isInitialized()) {
-           mAudioTrack.setPlaybackRate((int)(mSampleRate * speed));
+        if (isInitialized()) {
+            // TODO plug the sonic function here
+            mSonic.setSpeed(speed);
+//            mAudioTrack.setPlaybackRate((int) (mSampleRate * speed));
         } else {
             throw new IllegalStateException();
         }
@@ -368,7 +385,7 @@ class AudioPlayback {
 
     private void writeToPlaybackBuffer(ByteBuffer audioData, long presentationTimeUs) {
         int size = audioData.remaining();
-        if(mTransferBuffer == null || mTransferBuffer.length < size) {
+        if (mTransferBuffer == null || mTransferBuffer.length < size) {
             mTransferBuffer = new byte[size];
         }
         audioData.get(mTransferBuffer, 0, size);
@@ -376,6 +393,33 @@ class AudioPlayback {
         //Log.d(TAG, "audio write / chunk count " + mPlaybackBufferChunkCount);
         mLastPresentationTimeUs = presentationTimeUs;
         mAudioTrack.write(mTransferBuffer, 0, size);
+    }
+
+    private void newWriteToPlaybackBuffer(ByteBuffer audioData, long presentationTimeUs) {
+        int size = audioData.remaining();
+        if (mTransferBuffer == null || mTransferBuffer.length < size) {
+            mTransferBuffer = new byte[size];
+        }
+        audioData.get(mTransferBuffer, 0, size);
+
+        //Log.d(TAG, "audio write / chunk count " + mPlaybackBufferChunkCount);
+        mLastPresentationTimeUs = presentationTimeUs;
+
+        byte[] modifiedSamples = new byte[2048];
+        if (size > 0) {
+            mSonic.putBytes(mTransferBuffer, size);
+        } else {
+            mSonic.flush();
+        }
+        int available = mSonic.availableBytes();
+        if (available > 0) {
+            if (modifiedSamples.length < available) {
+                modifiedSamples = new byte[available * 2];
+            }
+            mSonic.receiveBytes(modifiedSamples, available);
+            mAudioTrack.write(modifiedSamples, 0, available);
+        }
+//        mAudioTrack.write(mTransferBuffer, 0, size);
     }
 
     /**
@@ -386,7 +430,7 @@ class AudioPlayback {
         mVolumeLeft = leftGain;
         mVolumeRight = rightGain;
 
-        if(mAudioTrack != null) {
+        if (mAudioTrack != null) {
             mAudioTrack.setStereoVolume(leftGain, rightGain);
         }
     }
@@ -441,10 +485,10 @@ class AudioPlayback {
 
         @Override
         public void run() {
-            while(!isInterrupted()) {
+            while (!isInterrupted()) {
                 try {
-                    synchronized(this) {
-                        while(mPaused) {
+                    synchronized (this) {
+                        while (mPaused) {
                             wait();
                         }
                     }
@@ -456,7 +500,8 @@ class AudioPlayback {
                         }
                     }
 
-                    writeToPlaybackBuffer(bufferItem.buffer, bufferItem.presentationTimeUs);
+//                    writeToPlaybackBuffer(bufferItem.buffer, bufferItem.presentationTimeUs);
+                    newWriteToPlaybackBuffer(bufferItem.buffer, bufferItem.presentationTimeUs);
                     mBufferQueue.put(bufferItem);
                 } catch (InterruptedException e) {
                     interrupt();
@@ -495,7 +540,7 @@ class AudioPlayback {
 
         synchronized void put(ByteBuffer data, long presentationTimeUs) {
             //Log.d(TAG, "put");
-            if(data.remaining() > bufferSize) {
+            if (data.remaining() > bufferSize) {
                 /* Buffer size has increased, invalidate all empty buffers since they can not be
                  * reused any more. */
                 emptyBuffers.clear();
@@ -503,7 +548,7 @@ class AudioPlayback {
             }
 
             Item item;
-            if(!emptyBuffers.isEmpty()) {
+            if (!emptyBuffers.isEmpty()) {
                 item = emptyBuffers.remove(0);
             } else {
                 item = new Item(data.remaining());
@@ -526,7 +571,7 @@ class AudioPlayback {
         synchronized Item take() {
             //Log.d(TAG, "take");
             Item item = bufferQueue.poll();
-            if(item != null) {
+            if (item != null) {
                 mQueuedDataSize -= item.buffer.remaining();
             }
             return item;
@@ -536,7 +581,7 @@ class AudioPlayback {
          * Returns a buffer to the queue for reuse.
          */
         synchronized void put(Item returnItem) {
-            if(returnItem.buffer.capacity() != bufferSize) {
+            if (returnItem.buffer.capacity() != bufferSize) {
                 /* The buffer size has changed and the returned buffer is not valid any more and
                  * can be discarded. */
                 return;
@@ -551,7 +596,7 @@ class AudioPlayback {
          */
         synchronized void flush() {
             Item item;
-            while((item = bufferQueue.poll()) != null) {
+            while ((item = bufferQueue.poll()) != null) {
                 put(item);
             }
             mQueuedDataSize = 0;

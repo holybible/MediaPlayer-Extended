@@ -7,12 +7,14 @@ import android.os.Environment;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.v7.app.AppCompatActivity;
+import android.widget.EditText;
 
 import net.protyposis.android.mediaplayer.MediaPlayer;
 import net.protyposis.android.mediaplayer.UriSource;
 
 import java.io.IOException;
 
+import butterknife.BindView;
 import butterknife.ButterKnife;
 import butterknife.OnClick;
 import permissions.dispatcher.NeedsPermission;
@@ -20,6 +22,9 @@ import permissions.dispatcher.RuntimePermissions;
 
 @RuntimePermissions
 public class MainActivity extends AppCompatActivity {
+
+    @BindView(R.id.edit_speed)
+    EditText mSpeedEdt;
 
     String scarletMp3 = Environment.getExternalStorageDirectory().getAbsolutePath() + "/"
             + "audiowork/Scarlet.mp3";
@@ -63,6 +68,13 @@ public class MainActivity extends AppCompatActivity {
     @OnClick(R.id.button_play_file)
     void clickPlayFile() {
         MainActivityPermissionsDispatcher.playFileWithCheck(this);
+    }
+
+    @OnClick(R.id.button_change_speed)
+    void clickChange() {
+        String text = mSpeedEdt.getText().toString();
+        float speed = Float.parseFloat(text);
+        mPlayer.setPlaybackSpeed(speed);
     }
 
     @NeedsPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
