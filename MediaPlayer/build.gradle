@@ -2,7 +2,7 @@ apply plugin: 'com.android.library'
 apply plugin: 'com.novoda.bintray-release'
 apply plugin: 'com.github.dcendents.android-maven'
 
-version = "4.3.0.1-SNAPSHOT"
+version = "4.3.0.1"
 group = "net.protyposis.android.mediaplayer"
 
 android {
@@ -27,7 +27,7 @@ android {
 
 repositories {
     maven {
-        url "${localRepo}"
+        url "${iyubaProxy}"
     }
 }
 
@@ -47,4 +47,6 @@ publish {
 }
 
 //apply from: "../gitversioning.gradle"
-apply from: 'local-push.gradle'
+apply from: '../artifact.gradle'
+//apply from: 'local-push.gradle'
+apply from: 'iyuba-push.gradle'

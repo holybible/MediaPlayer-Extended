@@ -22,7 +22,7 @@ android {
 
 repositories {
     maven {
-        url "${localRepo}"
+        url "${iyubaProxy}"
     }
 }
 
