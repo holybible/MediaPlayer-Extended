@@ -661,17 +661,7 @@ public class MediaPlayer {
      * {@link #prepare()} or {@link #prepareAsync()}.
      */
     public void stop() {
-        mCurrentPosition = 0; // TODO a lot of work todo
-        release();
-        mCurrentState = State.STOPPED;
-    }
-
-    public void release() {
-        if(mCurrentState == State.RELEASING || mCurrentState == State.RELEASED) {
-            return;
-        }
-
-        mCurrentState = State.RELEASING;
+        mCurrentPosition = 0; // TODO is this right here ???
 
         if(mPlaybackThread != null) {
             // Create a new lock object for this release cycle

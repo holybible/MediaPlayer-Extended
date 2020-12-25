@@ -1,6 +1,6 @@
 apply plugin: 'com.android.library'
-apply plugin: 'com.novoda.bintray-release'
-apply plugin: 'com.github.dcendents.android-maven'
+//apply plugin: 'com.novoda.bintray-release'
+//apply plugin: 'com.github.dcendents.android-maven'
 
 version = "{$rootProject.ext.libraryVersionName}-modify"
 group = "net.protyposis.android.mediaplayer"
@@ -30,15 +30,15 @@ dependencies {
     compileOnly 'com.vinuxproject:sonic:1.0.1'
 }
 
-publish {
-    userOrg = 'protyposis'
-    groupId = playerModuleBase
-    artifactId = 'mediaplayer'
-    publishVersion = libraryVersionString()
-    desc = 'MediaPlayer-Extended core module'
-    website = 'https://github.com/protyposis/MediaPlayer-Extended'
-    licences = ['Apache-2.0']
-}
+//publish {
+//    userOrg = 'protyposis'
+//    groupId = playerModuleBase
+//    artifactId = 'mediaplayer'
+//    publishVersion = libraryVersionString()
+//    desc = 'MediaPlayer-Extended core module'
+//    website = 'https://github.com/protyposis/MediaPlayer-Extended'
+//    licences = ['Apache-2.0']
+//}
 
 //apply from: "../gitversioning.gradle"
 apply from: '../artifact.gradle'

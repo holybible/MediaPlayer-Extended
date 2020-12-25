@@ -27,15 +27,7 @@ public class MainActivity extends AppCompatActivity {
     EditText mSpeedEdt;
 
     String scarletMp3 = Environment.getExternalStorageDirectory().getAbsolutePath() + "/"
-            + "audiowork/Scarlet.mp3";
-    String senrenopMp3 = Environment.getExternalStorageDirectory().getAbsolutePath() + "/"
-            + "audiowork/senrenbankaop.mp3";
-    String readWav = Environment.getExternalStorageDirectory().getAbsolutePath() + "/"
-            + "audiowork/read_sentence.wav";
-    String readAmr = Environment.getExternalStorageDirectory().getAbsolutePath() + "/"
-            + "audiowork/read_sentence_ffmpeg_out.amr";
-    String voa = Environment.getExternalStorageDirectory().getAbsolutePath() + "/"
-            + "audiowork/voa_4956.mp3";
+            + "Music/Scarlet.mp3";
 
     MediaPlayer mPlayer;
 
@@ -67,7 +59,7 @@ public class MainActivity extends AppCompatActivity {
 
     @OnClick(R.id.button_play_file)
     void clickPlayFile() {
-        MainActivityPermissionsDispatcher.playFileWithCheck(this);
+        MainActivityPermissionsDispatcher.playFileWithPermissionCheck(this);
     }
 
     @OnClick(R.id.button_change_speed)
@@ -80,7 +72,7 @@ public class MainActivity extends AppCompatActivity {
     @NeedsPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
     void playFile() {
         try {
-            mPlayer.setDataSource(new UriSource(this, Uri.parse(senrenopMp3)));
+            mPlayer.setDataSource(new UriSource(this, Uri.parse(scarletMp3)));
             mPlayer.prepareAsync();
         } catch (IOException e) {
             e.printStackTrace();
