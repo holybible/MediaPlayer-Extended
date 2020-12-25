@@ -68,7 +68,7 @@ class Decoders {
      * @param force force decoding in a loop until a frame becomes available or the EOS is reached
      * @return a VideoFrameInfo object holding metadata of a decoded video frame or NULL if no frame has been decoded
      */
-    public MediaCodecDecoder.FrameInfo decodeFrame(boolean force) {
+    public MediaCodecDecoder.FrameInfo decodeFrame(boolean force) throws IOException {
         //Log.d(TAG, "decodeFrame");
         boolean outputEos = false;
 
@@ -156,6 +156,17 @@ class Decoders {
             }
         }
         return minPTS;
+    }
+
+    public long getInputSamplePTS() {
+        long maxPTS = MediaCodecDecoder.PTS_UNKNOWN;
+        for (MediaCodecDecoder decoder : mDecoders) {
+            long pts = decoder.getInputSamplePTS();
+            if(pts > maxPTS) {
+                maxPTS = pts;
+            }
+        }
+        return maxPTS;
     }
 
     public boolean isEOS() {

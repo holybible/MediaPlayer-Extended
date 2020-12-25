@@ -1,2 +1,4 @@
-include ':MediaPlayer-DASH', ':myplayerdemo'
-include ':MediaPlayer', ':MediaPlayerDemo'
+include ':MediaPlayer-DASH'
+include ':myplayerdemo'
+include ':MediaPlayer'
+// include ':MediaPlayerDemo'

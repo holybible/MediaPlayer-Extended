@@ -2,7 +2,7 @@ apply plugin: 'com.android.library'
 apply plugin: 'com.novoda.bintray-release'
 apply plugin: 'com.github.dcendents.android-maven'
 
-version = "4.3.0.1"
+version = "{$rootProject.ext.libraryVersionName}-modify"
 group = "net.protyposis.android.mediaplayer"
 
 android {
@@ -25,15 +25,9 @@ android {
     }
 }
 
-repositories {
-    maven {
-        url "${iyubaProxy}"
-    }
-}
-
 dependencies {
     compile fileTree(dir: 'libs', include: ['*.jar'])
-    provided 'com.vinuxproject:sonic:1.0.0'
+    compileOnly 'com.vinuxproject:sonic:1.0.1'
 }
 
 publish {
@@ -48,5 +42,4 @@ publish {
 
 //apply from: "../gitversioning.gradle"
 apply from: '../artifact.gradle'
-//apply from: 'local-push.gradle'
-apply from: 'iyuba-push.gradle'
+apply from: '../archive-push.gradle'

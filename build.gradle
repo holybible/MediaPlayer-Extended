@@ -4,11 +4,12 @@ buildscript {
     repositories {
         mavenCentral()
         jcenter()
+        google()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:2.3.3'
-        classpath 'com.novoda:bintray-release:0.3.4'
-        classpath 'com.github.dcendents:android-maven-gradle-plugin:1.5'
+        classpath 'com.android.tools.build:gradle:4.1.1'
+        // classpath 'com.novoda:bintray-release:0.3.4'
+        // classpath 'com.github.dcendents:android-maven-gradle-plugin:1.5'
         // NOTE: Do not place your application dependencies here; they belong
         // in the individual module build.gradle files
     }
@@ -17,8 +18,10 @@ buildscript {
 allprojects {
     repositories {
         jcenter()
+        google()
         mavenCentral()
         mavenLocal()
+        maven {url "${localRepo}"}
     }
 }
 
@@ -26,17 +29,17 @@ ext {
     packageBase = 'net.protyposis.android'
     playerModuleBase = packageBase + '.mediaplayer'
     isLibrary = true
-    libraryVersionCode = 29
-    libraryVersionName = '4.3.0'
+    libraryVersionCode = 35
+    libraryVersionName = '4.4.1'
     librarySnaphotEnabled = true
 
     libraryVersionString = {
         return libraryVersionName + (librarySnaphotEnabled ? '-SNAPSHOT' : '')
     }
 
-    buildToolsVersion = "25.0.3"
-    compileSdkVersion = 25
+    buildToolsVersion = "28.0.3"
+    compileSdkVersion = 28
     minSdkVersion = 16
-    targetSdkVersion = 25
-    supportLibraryVersion = "25.3.1"
+    targetSdkVersion = 28
+    supportLibraryVersion = "28.0.0"
 }

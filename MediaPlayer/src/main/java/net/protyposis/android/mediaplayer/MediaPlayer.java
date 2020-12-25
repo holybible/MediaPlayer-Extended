@@ -29,7 +29,6 @@ import android.view.SurfaceHolder;
 
 import java.io.IOException;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
 
 /**
  * Created by maguggen on 04.06.2014.
@@ -185,6 +184,7 @@ public class MediaPlayer {
     private OnInfoListener mOnInfoListener;
     private OnVideoSizeChangedListener mOnVideoSizeChangedListener;
     private OnBufferingUpdateListener mOnBufferingUpdateListener;
+    private OnCueListener mOnCueListener;
 
     private PowerManager.WakeLock mWakeLock = null;
     private boolean mScreenOnWhilePlaying;
@@ -195,6 +195,7 @@ public class MediaPlayer {
     private Decoders mDecoders;
     private boolean mBuffering;
     private VideoRenderTimingMode mVideoRenderTimingMode;
+    private final Timeline mCueTimeline;
 
     private State mCurrentState;
 
@@ -213,6 +214,7 @@ public class MediaPlayer {
         mCurrentState = State.IDLE;
         mAudioSessionId = 0; // AudioSystem.AUDIO_SESSION_ALLOCATE;
         mAudioStreamType = AudioManager.STREAM_MUSIC;
+        mCueTimeline = new Timeline();
     }
 
     /**
@@ -231,6 +233,8 @@ public class MediaPlayer {
         if(mCurrentState != State.IDLE) {
             throw new IllegalStateException();
         }
+
+        releaseMediaExtractors();
 
         mVideoExtractor = source.getVideoExtractor();
         mAudioExtractor = source.getAudioExtractor();
@@ -291,6 +295,20 @@ public class MediaPlayer {
         mCurrentState = State.INITIALIZED;
     }
 
+    private void releaseMediaExtractors() {
+        // Audio and video extractors could be the same object,
+        // but calling release twice does not hurt.
+        if (mAudioExtractor != null) {
+            mAudioExtractor.release();
+            mAudioExtractor = null;
+        }
+
+        if (mVideoExtractor != null) {
+            mVideoExtractor.release();
+            mVideoExtractor = null;
+        }
+    }
+
     /**
      * Sets the media source and automatically selects fitting tracks.
      *
@@ -338,6 +356,8 @@ public class MediaPlayer {
     }
 
     private void prepareInternal() throws IOException, IllegalStateException {
+        mCueTimeline.reset();
+
         MediaCodecDecoder.OnDecoderEventListener decoderEventListener = new MediaCodecDecoder.OnDecoderEventListener() {
             @Override
             public void onBuffering(MediaCodecDecoder decoder) {
@@ -584,7 +604,9 @@ public class MediaPlayer {
 
     /**
      * Sets the playback speed. Can be used for fast forward and slow motion.
-     * The speed must not be negative.
+     * The speed must not be negative but can otherwise be set to any value. The player will not
+     * skip frames though and only playback at the maximum speed that the device can decode and
+     * process (setting 10x speed thus will not lead to an actual 10x speedup).
      *
      * speed 0.5 = half speed / slow motion
      * speed 2.0 = double speed / fast forward
@@ -633,6 +655,11 @@ public class MediaPlayer {
         return mLooping;
     }
 
+    /**
+     * Stops the player and releases the playback thread. The player will consume minimal resources
+     * after calling this method. To continue playback, the player must first be prepared with
+     * {@link #prepare()} or {@link #prepareAsync()}.
+     */
     public void stop() {
         mCurrentPosition = 0; // TODO a lot of work todo
         release();
@@ -653,11 +680,13 @@ public class MediaPlayer {
             synchronized (mReleaseSyncLock) {
                 try {
                     // Schedule release on the playback thread
-                    mPlaybackThread.release();
+                    boolean awaitingRelease = mPlaybackThread.release();
                     mPlaybackThread = null;
 
                     // Wait for the release on the playback thread to finish
-                    mReleaseSyncLock.wait();
+                    if (awaitingRelease) {
+                        mReleaseSyncLock.wait();
+                    }
                 } catch (InterruptedException e) {
                     // nothing to do here
                 }
@@ -668,12 +697,47 @@ public class MediaPlayer {
 
         stayAwake(false);
 
-        mCurrentState = State.RELEASED;
+        mAudioPlayback = null;
+
+        mCurrentState = State.STOPPED;
     }
 
+    /**
+     * Resets the player to its initial state, similar to a freshly created instance. To reuse the
+     * player instance, set a data source and call {@link #prepare()} or {@link #prepareAsync()}.
+     */
     public void reset() {
         stop();
         mCurrentState = State.IDLE;
+    }
+
+    /**
+     * Stops the player and releases all resources (e.g. memory, codecs, event listeners). Once
+     * the player instance is released, it cannot be used any longer.
+     * Call this method as soon as you're finished using the player instance, and latest when
+     * destroying the activity or fragment that contains this player. Not releasing the player can
+     * lead to memory leaks.
+     */
+    public void release() {
+        if(mCurrentState == State.RELEASING || mCurrentState == State.RELEASED) {
+            return;
+        }
+
+        mCurrentState = State.RELEASING;
+        stop();
+        releaseMediaExtractors();
+        mCurrentState = State.RELEASED;
+
+        // Listeners must not be invoked after the player is released so we clear them here
+        // https://github.com/protyposis/MediaPlayer-Extended/issues/66
+        mOnBufferingUpdateListener = null;
+        mOnCompletionListener = null;
+        mOnErrorListener = null;
+        mOnInfoListener = null;
+        mOnPreparedListener = null;
+        mOnSeekCompleteListener = null;
+        mOnSeekListener = null;
+        mOnVideoSizeChangedListener = null;
     }
 
     /**
@@ -850,6 +914,44 @@ public class MediaPlayer {
         mVideoRenderTimingMode = mode;
     }
 
+    /**
+     * Adds a cue point to the media playback timeline. When the cue point is passed, a cue event
+     * with this data will be issued to a registered cue listener with
+     * {@link #setOnCueListener(OnCueListener)}. The cue point can carry arbitrary data as an
+     * attachment.
+     *
+     * @param timeMs the time in milliseconds on the playback timeline at which this cue will be fired
+     * @param data   optional data that will be exposed through the cue event
+     * @return A cue object that can be used to remove the cue from the playback timeline through
+     * {@link #removeCue(Cue)}. This is the same cue object that will be provided to the
+     * {@link OnCueListener} so this can be used as a lookup key for associated data.
+     */
+    public Cue addCue(int timeMs, Object data) {
+        Cue cue = new Cue(timeMs, data);
+
+        mCueTimeline.addCue(cue);
+
+        return cue;
+    }
+
+    /**
+     * @see #addCue(int, Object)
+     */
+    public Cue addCue(int timeMs) {
+        return addCue(timeMs, null);
+    }
+
+    /**
+     * Removes a cue added by {@link #addCue(int, Object)} from the playback timeline.
+     *
+     * @param cue the cue to remove
+     * @return true if removal was successful, false if the cue wasn't cued on the timeline,
+     * i.e. it has already been removed before
+     */
+    public boolean removeCue(Cue cue) {
+        return mCueTimeline.removeCue(cue);
+    }
+
     private class PlaybackThread extends HandlerThread implements Handler.Callback {
 
         private static final int PLAYBACK_PREPARE = 1;
@@ -870,6 +972,9 @@ public class MediaPlayer {
         private boolean mRenderingStarted; // Flag to know if decoding the first frame
         private double mPlaybackSpeed;
         private boolean mAVLocked;
+        private long mLastBufferingUpdateTime;
+        private long mLastCueEventTime;
+        private Timeline.OnCueListener mOnTimelineCueListener;
 
         public PlaybackThread() {
             // Give this thread a high priority for more precise event timing
@@ -881,6 +986,14 @@ public class MediaPlayer {
             mRenderModeApi21 = mVideoRenderTimingMode.isRenderModeApi21();
             mRenderingStarted = true;
             mAVLocked = false;
+            mLastBufferingUpdateTime = 0;
+            mLastCueEventTime = 0;
+            mOnTimelineCueListener = new Timeline.OnCueListener() {
+                @Override
+                public void onCue(Cue cue) {
+                    mEventHandler.sendMessage(mEventHandler.obtainMessage(MEDIA_CUE, cue));
+                }
+            };
         }
 
         @Override
@@ -923,9 +1036,9 @@ public class MediaPlayer {
             mHandler.sendMessage(mHandler.obtainMessage(PlaybackThread.DECODER_SET_SURFACE, surface));
         }
 
-        private void release() {
+        private boolean release() {
             if(!isAlive()) {
-                return;
+                return false;
             }
 
             mPaused = true; // Set this flag so the loop does not schedule next loop iteration
@@ -936,6 +1049,8 @@ public class MediaPlayer {
             // something so {@link #handleMessage} gets called on the handler thread, read the
             // mReleasing flag, and call {@link #releaseInternal}.
             mHandler.sendEmptyMessage(PLAYBACK_RELEASE);
+
+            return true;
         }
 
         @Override
@@ -1024,6 +1139,7 @@ public class MediaPlayer {
             if(mDecoders.isEOS()) {
                 mCurrentPosition = 0;
                 mDecoders.seekTo(SeekMode.FAST_TO_PREVIOUS_SYNC, 0);
+                mCueTimeline.setPlaybackPosition(0);
             }
 
             // reset time (otherwise playback tries to "catch up" time after a pause)
@@ -1081,8 +1197,17 @@ public class MediaPlayer {
                 // the prefetched data.
                 // This comes before the buffering pause to update the clients buffering info
                 // also during a buffering playback pause.
-                mEventHandler.sendMessage(mEventHandler.obtainMessage(MEDIA_BUFFERING_UPDATE,
-                        (int) (100d / (getDuration() * 1000) * (mCurrentPosition + cachedDuration)), 0));
+                // Use the PTS of the decoder input for a more precise buffer calculation (the
+                // cached duration is the duration from the read position in the media extractor,
+                // which is about the same position as the position from where the last sample
+                // has been read).
+                long currentPosition = mDecoders.getInputSamplePTS();
+                if (currentPosition == MediaCodecDecoder.PTS_UNKNOWN) {
+                    // If this input PTS is not available, e.g. directly after a seek, fall
+                    // back to the current playback position.
+                    currentPosition = mCurrentPosition;
+                }
+                updateBufferPercentage((int) (100d / (getDuration() * 1000) * (currentPosition + cachedDuration)));
             }
 
             // If we are in buffering mode, check if the buffer has been filled until the low water
@@ -1133,6 +1258,14 @@ public class MediaPlayer {
             // Update the current position of the player
             mCurrentPosition = mDecoders.getCurrentDecodingPTS();
 
+            // fire cue events
+            // Rate limited to 10 Hz (every 100ms)
+            if (mCueTimeline.count() > 0 && startTime - mLastCueEventTime > 100) {
+                mLastCueEventTime = startTime;
+                mCueTimeline.movePlaybackPosition((int) (mCurrentPosition / 1000),
+                        mOnTimelineCueListener);
+            }
+
             if(mDecoders.getVideoDecoder() != null && mVideoFrameInfo != null) {
                 renderVideoFrame(mVideoFrameInfo);
                 mVideoFrameInfo = null;
@@ -1171,6 +1304,7 @@ public class MediaPlayer {
                         mAudioPlayback.flush();
                     }
                     mDecoders.seekTo(SeekMode.FAST_TO_PREVIOUS_SYNC, 0);
+                    mCueTimeline.setPlaybackPosition(0);
                     mDecoders.renderFrames();
                 }
                 // ... else just pause playback and wait for next command
@@ -1243,6 +1377,8 @@ public class MediaPlayer {
                 if(!mPaused) {
                     playInternal();
                 }
+
+                mCueTimeline.setPlaybackPosition((int)(mCurrentPosition / 1000));
             }
         }
 
@@ -1264,10 +1400,8 @@ public class MediaPlayer {
                 mDecoders.release();
             }
             if(mAudioPlayback != null) mAudioPlayback.stopAndRelease();
-            if(mAudioExtractor != null & mAudioExtractor != mVideoExtractor) {
-                mAudioExtractor.release();
-            }
-            if(mVideoExtractor != null) mVideoExtractor.release();
+
+            MediaPlayer.this.releaseMediaExtractors();
 
             Log.d(TAG, "PlaybackThread destroyed");
 
@@ -1320,7 +1454,7 @@ public class MediaPlayer {
             mDecoders.getVideoDecoder().renderFrame(videoFrameInfo, waitingTime);
         }
 
-        private void setVideoSurface(Surface surface) {
+        private void setVideoSurface(Surface surface) throws IOException {
             if(mDecoders != null && mDecoders.getVideoDecoder() != null) {
                 if(mVideoFrameInfo != null) {
                     // Dismiss queued video frame
@@ -1333,6 +1467,25 @@ public class MediaPlayer {
 
                 mDecoders.getVideoDecoder().updateSurface(surface);
             }
+        }
+
+        private void updateBufferPercentage(int percent) {
+            long currentTime = SystemClock.elapsedRealtime();
+
+            // Throttle the MEDIA_BUFFERING_UPDATE frequency to at most once per second
+            // and only issue updates when the percentage actually changes.
+            if (currentTime - mLastBufferingUpdateTime > 1000 && percent != mBufferPercentage) {
+                mLastBufferingUpdateTime = currentTime;
+                // Clamp the reported percent to 100% to avoid percentages above 100, which can
+                // happen due to the not exactly precise buffer level calculation
+                mEventHandler.sendMessage(mEventHandler.obtainMessage(MEDIA_BUFFERING_UPDATE,
+                        Math.min(percent, 100), 0));
+            }
+
+            // Update the buffer percentage at every call so a user of the library can decide
+            // to update the buffer fill state more often than the buffering update handler is
+            // called by calling getBufferPercentage at his desired frequency.
+            mBufferPercentage = percent;
         }
     }
 
@@ -1606,6 +1759,27 @@ public class MediaPlayer {
         mOnInfoListener = listener;
     }
 
+    /**
+     * Interface definition of an event callback to be invoked when playback passes a cue point.
+     */
+    public interface OnCueListener {
+        /**
+         * Called to indicate that a cue point has been reached/passed during playback.
+         * @param mp The MediaPlayer that this event originates from
+         * @param cue the definition of the cue point
+         */
+        void onCue(MediaPlayer mp, Cue cue);
+    }
+
+    /**
+     * Register a callback to be invoked when a cue point cued with {@link #addCue} is
+     * passed during playback.
+     * @param listener the callback that will be called
+     */
+    public void setOnCueListener(OnCueListener listener) {
+        mOnCueListener = listener;
+    }
+
     private static final int MEDIA_PREPARED = 1;
     private static final int MEDIA_PLAYBACK_COMPLETE = 2;
     private static final int MEDIA_BUFFERING_UPDATE = 3;
@@ -1613,6 +1787,7 @@ public class MediaPlayer {
     private static final int MEDIA_SET_VIDEO_SIZE = 5;
     private static final int MEDIA_ERROR = 100;
     private static final int MEDIA_INFO = 200;
+    private static final int MEDIA_CUE = 1000;
 
     private class EventHandler extends Handler {
         @Override
@@ -1664,7 +1839,11 @@ public class MediaPlayer {
                     //Log.d(TAG, "onBufferingUpdate");
                     if (mOnBufferingUpdateListener != null)
                         mOnBufferingUpdateListener.onBufferingUpdate(MediaPlayer.this, msg.arg1);
-                    mBufferPercentage = msg.arg1;
+                    return;
+
+                case MEDIA_CUE:
+                    if (mOnCueListener != null)
+                        mOnCueListener.onCue(MediaPlayer.this, (Cue)msg.obj);
                     return;
 
                 default:

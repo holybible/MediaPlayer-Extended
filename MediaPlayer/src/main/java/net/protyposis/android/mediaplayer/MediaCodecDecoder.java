@@ -18,6 +18,7 @@ package net.protyposis.android.mediaplayer;
 
 import android.media.MediaCodec;
 import android.media.MediaFormat;
+import android.os.Build;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -70,6 +71,7 @@ abstract class MediaCodecDecoder {
 
     public static final long PTS_NONE = Long.MIN_VALUE;
     public static final long PTS_EOS = Long.MAX_VALUE;
+    public static final long PTS_UNKNOWN = -1;
 
     private static final long TIMEOUT_US = 0;
     public static final int INDEX_NONE = -1;
@@ -102,6 +104,7 @@ abstract class MediaCodecDecoder {
      */
     private boolean mPassive;
 
+    private long mInputSamplePTS;
     private long mDecodingPTS;
 
     private FrameInfo mCurrentFrameInfo;
@@ -153,14 +156,45 @@ abstract class MediaCodecDecoder {
     /**
      * Starts or restarts the codec with a new format, e.g. after a representation change.
      */
-    protected final void reinitCodec() {
+    protected final void reinitCodec() throws IOException {
         try {
             long t1 = SystemClock.elapsedRealtime();
+            /* On some versions of Android it does not work to reconfigure an existing codec
+             * instance. The codec just won't return any input buffer afterwards, stalling
+             * decoding and thus playback. Instead, we need to create a completely new instance.
+             *
+             * https://github.com/protyposis/MediaPlayer-Extended/issues/67
+             *
+             * Issue observed on:
+             * - Android 4.1.2 (LG Lucid 2 [VS870 4G])
+             * - CM 10.1.3 / Android 4.2.2 (Samsung Galaxy S2 [GT-I9100])
+             * - CM 10.1.3 / Android 4.2.2 (Samsung Galaxy S3 [SGH-I747])
+             *
+             * Non-issue on:
+             * - Android 4.1.2 (Samsung Galaxy S2 / GT-I9100)
+             * - Android 4.4.4 (Samsung Galaxy S3 [SGH-I747])
+             * - Android 5.x (Nexus 5)
+             * - Android 5.1 (Blu Energy X2)
+             * - Android 6.x (Nexus 5X)
+             * - Android 7.x (Nexus 5X)
+             * - Android 7.1 (Nexus 5X)
+             * - Android 7.1.1 (OnePlus 3 [A3000])
+             *
+             * Since this issue has only been observed on Android below 4.4, we limit this fix to
+             * these versions.
+              */
+            boolean createNewDecoder = Build.VERSION.SDK_INT < Build.VERSION_CODES.KITKAT;
 
             // Get new format and restart codec with this format
             mFormat = mExtractor.getTrackFormat(mTrackIndex);
 
             mCodec.stop();
+
+            if (createNewDecoder) {
+                mCodec.release();
+                mCodec = MediaCodec.createDecoderByType(mFormat.getString(MediaFormat.KEY_MIME));
+            }
+
             configureCodec(mCodec, mFormat);
             mCodec.start(); // TODO speedup, but how? this takes a long time and introduces lags when switching DASH representations (AVC codec)
             mCodecInputBuffers = mCodec.getInputBuffers();
@@ -287,6 +321,8 @@ abstract class MediaCodecDecoder {
                         presentationTimeUs,
                         mInputEos ? MediaCodec.BUFFER_FLAG_END_OF_STREAM : 0);
 
+                mInputSamplePTS = presentationTimeUs;
+
                 //Log.d(TAG, "queued PTS " + presentationTimeUs);
 
                 if (!mInputEos) {
@@ -303,7 +339,7 @@ abstract class MediaCodecDecoder {
      * @return a FrameInfo if a frame was available; NULL if the decoder needs more input
      * samples/decoding time or if the output EOS has been reached
      */
-    public final FrameInfo dequeueDecodedFrame() {
+    public final FrameInfo dequeueDecodedFrame() throws IOException {
         if(mOutputEos) return null;
 
         int res = mCodec.dequeueOutputBuffer(mBufferInfo, TIMEOUT_US);
@@ -370,10 +406,19 @@ abstract class MediaCodecDecoder {
 
     /**
      * Returns the PTS of the current, that is, the most recently decoded frame.
-     * @return the PTS of the most recent frame
+     * @return the PTS of the most recent decoded frame
      */
     public long getCurrentDecodingPTS() {
         return mDecodingPTS;
+    }
+
+    /**
+     * Returns the PTS of the current frame enqueued for decoding. This is always ahead of
+     * {@link #getCurrentDecodingPTS()}.
+     * @return the PTS of the most recent frame enqueued for decoding
+     */
+    public long getInputSamplePTS() {
+        return mInputSamplePTS;
     }
 
     /**
@@ -471,7 +516,7 @@ abstract class MediaCodecDecoder {
      * @param force force decoding in a loop until a frame becomes available or the EOS is reached
      * @return a FrameInfo object holding metadata of a decoded frame or NULL if no frame has been decoded
      */
-    public final FrameInfo decodeFrame(boolean skip, boolean force) {
+    public final FrameInfo decodeFrame(boolean skip, boolean force) throws IOException {
         //Log.d(TAG, "decodeFrame");
         while(!mOutputEos) {
             // Dequeue decoded frames
@@ -506,6 +551,7 @@ abstract class MediaCodecDecoder {
      */
     public final void seekTo(MediaPlayer.SeekMode seekMode, long seekTargetTimeUs) throws IOException {
         mDecodingPTS = PTS_NONE;
+        mInputSamplePTS = PTS_UNKNOWN;
         mCurrentFrameInfo = seekTo(seekMode, seekTargetTimeUs, mExtractor, mCodec);
     }
 
